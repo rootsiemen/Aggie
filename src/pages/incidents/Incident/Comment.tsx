@@ -24,6 +24,7 @@ import { faEdit, faEllipsisH, faTrash } from "@fortawesome/free-solid-svg-icons"
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import DateTime from "../../../components/DateTime";
 import DropdownMenu from "../../../components/DropdownMenu";
+import { buildMediaUrl } from "../../../utils/buildMediaUrl";
 
 interface IProps {
   data: GroupComment;
@@ -89,7 +90,6 @@ const Comment = ({ data, groupId }: IProps) => {
 
   if (!groupId) return <></>;
 
-  const UPLOAD_DIR = process.env.UPLOAD_DIR || process.env.PUBLIC_URL || "";
   const nameList = data.attachments.reduce(
     (accumulator, currentValue) => (
       accumulator.concat([
@@ -105,7 +105,7 @@ const Comment = ({ data, groupId }: IProps) => {
       accumulator.concat([
         currentValue instanceof File
         ? currentValue.webkitRelativePath
-        : UPLOAD_DIR + currentValue.path
+        : buildMediaUrl(currentValue.path)
       ])
     ),
     [] as string[]

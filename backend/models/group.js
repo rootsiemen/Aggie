@@ -32,7 +32,10 @@ const publicationValidator = function (arr) {
 const Attachment = new mongoose.Schema({
   fileName: { type: String, required: true},
   path: { type: String, required: true},
-  serverPath: {type: String, required: true},
+  // mediaassets key for the attachment bytes, e.g. `incidents/attachments/{sha256}.png`.
+  // Bytes live in MongoDB so they travel with the database; replaced the old absolute
+  // on-disk `serverPath`.
+  storageKey: {type: String, required: true},
   mimeType: { type: String, required: true},
   fileSize: {
     type: Number,

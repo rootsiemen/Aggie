@@ -9,7 +9,8 @@ const _ = require('lodash');
 var tags = require('../../shared/tags');
 const Report = require('../../models/report');
 const eventRouter = require('../sockets/event-router');
-const { saveFile, deleteFile, getUploadDir } = require('../utils/fileStorage');
+const { saveFile, deleteFile } = require('../utils/fileStorage');
+const MediaAsset = require('../../models/mediaAsset');
 const { MAX_ATTACHMENT_COUNT, MAX_ATTACHMENT_SIZE } = require('../../config/models/groupConfigs');
 const path = require('path');
 const { canViewIncident, canModifyIncidentWithScope } = require('../../access/incidentAccess');
@@ -44,16 +45,15 @@ exports.group_attachment_download = async (req, res) => {
 
     if (!attachment) return res.sendStatus(404);
 
-    const uploadRoot = path.resolve(getUploadDir());
-    const serverPath = path.resolve(uploadRoot, filename);
-    if (!serverPath.startsWith(`${uploadRoot}${path.sep}`)) {
-      return res.status(400).send('Invalid attachment storage path.');
-    }
+    // Bytes live in MongoDB (`mediaassets`), looked up from the attachment record — never
+    // trust the filename in the URL. Modeled on `serveMediaAsset` in backend/api.js, but on
+    // this route's own authenticated checks (attachments are not public like /media/*).
+    const asset = await MediaAsset.findOne({ key: attachment.storageKey }).lean();
+    if (!asset) return res.sendStatus(404);
+    const data = Buffer.isBuffer(asset.data) ? asset.data : asset.data.buffer;
 
-    return res.sendFile(serverPath, (err) => {
-      if (!err || res.headersSent) return;
-      return res.sendStatus(err.statusCode || 404);
-    });
+    res.set('Content-Type', attachment.mimeType);
+    return res.send(data);
   } catch (err) {
     return res
       .status(err.status || 500)
@@ -540,7 +540,7 @@ exports.group_comment_add = async (req, res) => {
   const groupIds = req.body.ids;
   const comment = req.body.comment;
   const attachments = req.files;
-  const savedPaths = [];
+  const savedKeys = [];
   
   try {
 
@@ -556,17 +556,17 @@ exports.group_comment_add = async (req, res) => {
       comment.attachments = [];
 
       for (const attachment of attachments) {
-        const savedPath = await saveFile(attachment.buffer, attachment.originalname);
+        const storageKey = await saveFile(attachment.buffer, attachment.originalname, attachment.mimetype);
 
-        if (savedPath) {
-          savedPaths.push(savedPath);
+        if (storageKey) {
+          savedKeys.push(storageKey);
 
-          const publicRefPath = `/incidents/uploads/${path.basename(savedPath)}`;
+          const publicRefPath = `/incidents/uploads/${path.basename(storageKey)}`;
 
           comment.attachments.push({
             fileName: attachment.originalname,
             path: publicRefPath, // relative path for frontend href
-            serverPath: savedPath, // actual server storage path
+            storageKey: storageKey, // mediaassets key for the attachment bytes
             mimeType: attachment.mimetype,
             fileSize: attachment.size,
           });
@@ -583,7 +583,7 @@ exports.group_comment_add = async (req, res) => {
       group.comments.push(comment);
       group.save(async (err) => {
         if (err) {
-          await Promise.all(savedPaths.map(deleteFile)); // if err, remove previous uploaded files;
+          await Promise.all(savedKeys.map(deleteFile)); // if err, remove previous uploaded files;
 
           if (!res.headersSent) res.status(err.status).send(err.message);
 
@@ -601,6 +601,9 @@ exports.group_comment_add = async (req, res) => {
 
   } catch (err) {
     console.error('[Api-Controller-group_comment_add] Failed adding comment: ', err.message);
+    // Roll back bytes uploaded in this request — deleteFile keeps bytes still referenced
+    // elsewhere, so shared (deduped) keys survive.
+    await Promise.all(savedKeys.map(deleteFile));
     res.status(err.status || 500).send('Failed adding comment', err.message);
   }
 
@@ -625,9 +628,9 @@ exports.group_comment_update = async (req, res) => {
   const commentId = commentPayload._id;
   const newData = commentPayload.data;
   const attachmentsToDelete = commentPayload.attachmentsToDelete || [];
-  const deletedPaths = [];
+  const deletedKeys = [];
   const attachmentsToUpload = req.files;
-  const savedPaths = [];
+  const savedKeys = [];
 
   try {
     const group = await Group.findById(groupIds[0]);
@@ -643,12 +646,10 @@ exports.group_comment_update = async (req, res) => {
     comment.attachments = comment.attachments.filter((att) => {
       const toDelete = attachmentsToDelete.includes(att._id.toString());
       if (toDelete) {
-        deletedPaths.push(att.serverPath);
+        deletedKeys.push(att.storageKey);
       }
       return !toDelete;      
     })
-
-    await Promise.all(deletedPaths.map(deleteFile));
 
     // Upload new attachments
     const totalAttachments = comment.attachments.length + attachmentsToUpload.length;
@@ -661,17 +662,17 @@ exports.group_comment_update = async (req, res) => {
 
     for (const attachment of attachmentsToUpload) {
 
-      const savedPath = await saveFile(attachment.buffer, attachment.originalname);
+      const storageKey = await saveFile(attachment.buffer, attachment.originalname, attachment.mimetype);
 
-      if (savedPath) {
-        savedPaths.push(savedPath);
+      if (storageKey) {
+        savedKeys.push(storageKey);
 
-        const publicRefPath = `/incidents/uploads/${path.basename(savedPath)}`;
+        const publicRefPath = `/incidents/uploads/${path.basename(storageKey)}`;
 
         comment.attachments.push({
           fileName: attachment.originalname,
           path: publicRefPath, // relative path for frontend href
-          serverPath: savedPath, // actual server storage path
+          storageKey: storageKey, // mediaassets key for the attachment bytes
           mimeType: attachment.mimetype,
           fileSize: attachment.size,
         });
@@ -680,6 +681,10 @@ exports.group_comment_update = async (req, res) => {
     }
 
     await group.save();
+
+    // Drop the bytes after the doc no longer references them — keys are content-addressed and
+    // may be shared, so deleteFile only removes bytes no other comment references.
+    await Promise.all(deletedKeys.map(deleteFile));
 
     await eventRouter.publish('groups:update', {
        ids: req.body.ids, 
@@ -690,6 +695,9 @@ exports.group_comment_update = async (req, res) => {
 
   } catch (err) {
     console.error('[Api-Controller-group_comment_update] Failed updating comment: ', err.message);
+    // Roll back bytes uploaded in this request — deleteFile keeps bytes still referenced
+    // elsewhere, so shared (deduped) keys survive.
+    await Promise.all(savedKeys.map(deleteFile));
     res.status(err.status || 500).send('Failed updating comment', err.message);
   }
 
@@ -712,12 +720,15 @@ exports.group_comment_remove = async (req, res) => {
     const comment = group.comments.id(commentId);
     if (!comment) { return res.status(404).send('Comment not found.'); };
 
-    let deletedPaths = [];
-    deletedPaths = comment.attachments.map(att => att.serverPath);
+    let deletedKeys = [];
+    deletedKeys = comment.attachments.map(att => att.storageKey);
 
-    await Promise.all(deletedPaths.map(deleteFile));
     await comment.remove();
     await group.save();
+
+    // Drop the bytes after the doc no longer references them — keys are content-addressed and
+    // may be shared, so deleteFile only removes bytes no other comment references.
+    await Promise.all(deletedKeys.map(deleteFile));
 
     await eventRouter.publish('groups:update', {
        ids: req.body.ids, 

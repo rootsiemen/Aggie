@@ -1,6 +1,7 @@
-// Stores media image bytes (social attachments + residual IODA chart SVGs) inline in MongoDB so
-// media travels with the database — no separate filesystem to mount, rsync, or back up. Replaces
-// the old on-disk `public/media/` store; the `key` and `/media/<key>` URL contract are unchanged.
+// Stores media bytes (social attachments, residual IODA chart SVGs, and incident comment
+// attachments) inline in MongoDB so media travels with the database — no separate filesystem
+// to mount, rsync, or back up. Replaces the old on-disk `public/media/` and `public/uploads/`
+// stores; the `key` and `/media/<key>` URL contract are unchanged.
 //
 // Written by the FETCH process during fetching (persistSocialImage / persistSvgChart in
 // socialImageStorage.js) and read by the API process while serving GET /media/<key>. Both processes
@@ -12,12 +13,13 @@ var mongoose = database.mongoose;
 var mediaAssetSchema = new mongoose.Schema(
   {
     // Same keys as the legacy disk store:
-    //   "social/full/{token}.{ext}", "social/thumb/{token}.{ext}", "ioda/charts/{sha1(guid)}.svg"
+    //   "social/full/{token}.{ext}", "social/thumb/{token}.{ext}", "ioda/charts/{sha1(guid)}.svg",
+    //   "incidents/attachments/{sha256}.{ext}"
     key: { type: String, required: true, unique: true },
     data: { type: Buffer, required: true }, // BSON BinData — the actual bytes
     contentType: { type: String, required: true },
     byteSize: { type: Number, required: true },
-    // Lifecycle/query bucket: "social-full" | "social-thumb" | "ioda-chart"
+    // Lifecycle/query bucket: "social-full" | "social-thumb" | "ioda-chart" | "incident-attachment"
     kind: { type: String, required: true, index: true },
     // Optional; mirrors attachment.sourcePlatform ("mastodon" / "telegramUser") for social images.
     sourcePlatform: { type: String, required: false },
